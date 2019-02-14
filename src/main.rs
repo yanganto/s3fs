@@ -15,51 +15,38 @@ use colored::*;
 use libc::ENOENT;
 use time::Timespec;
 use crossbeam_channel::{bounded, tick, Receiver, select};
+use users::get_current_uid;
 
 const TTL: Timespec = Timespec { sec: 1, nsec: 0 };                 // 1 second
 
 const CREATE_TIME: Timespec = Timespec { sec: 1381237736, nsec: 0 };    // 2013-10-08 08:56
 
-const HELLO_DIR_ATTR: FileAttr = FileAttr {
-    ino: 1,
-    size: 0,
-    blocks: 0,
-    atime: CREATE_TIME,
-    mtime: CREATE_TIME,
-    ctime: CREATE_TIME,
-    crtime: CREATE_TIME,
-    kind: FileType::Directory,
-    perm: 448u16, 
-    nlink: 2,
-    uid: 501,
-    gid: 20,
-    rdev: 0,
-    flags: 0,
-};
 
 const HELLO_TXT_CONTENT: &'static str = "Hello World!\n";
 
-const HELLO_TXT_ATTR: FileAttr = FileAttr {
-    ino: 2,
-    size: 13,
-    blocks: 1,
-    atime: CREATE_TIME,
-    mtime: CREATE_TIME,
-    ctime: CREATE_TIME,
-    crtime: CREATE_TIME,
-    kind: FileType::RegularFile,
-    perm: 511u16,
-    nlink: 1,
-    uid: 501,
-    gid: 20,
-    rdev: 0,
-    flags: 0,
-};
 
-struct S3Filesystem;
+struct S3Filesystem {
+    current_uid: u32,
+}
 
 impl Filesystem for S3Filesystem {
     fn lookup (&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
+        let HELLO_TXT_ATTR: FileAttr = FileAttr {
+            ino: 2,
+            size: 13,
+            blocks: 1,
+            atime: CREATE_TIME,
+            mtime: CREATE_TIME,
+            ctime: CREATE_TIME,
+            crtime: CREATE_TIME,
+            kind: FileType::RegularFile,
+            perm: 511u16,
+            nlink: 1,
+            uid: self.current_uid,
+            gid: self.current_uid,
+            rdev: 0,
+            flags: 0,
+        };
         if parent == 1 && name.to_str() == Some("hello.txt") {
             reply.entry(&TTL, &HELLO_TXT_ATTR, 0);
         } else {
@@ -68,6 +55,38 @@ impl Filesystem for S3Filesystem {
     }
 
     fn getattr (&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
+        let HELLO_DIR_ATTR: FileAttr = FileAttr {
+            ino: 1,
+            size: 0,
+            blocks: 0,
+            atime: CREATE_TIME,
+            mtime: CREATE_TIME,
+            ctime: CREATE_TIME,
+            crtime: CREATE_TIME,
+            kind: FileType::Directory,
+            perm: 448u16, 
+            nlink: 2,
+            uid: self.current_uid,
+            gid: self.current_uid,
+            rdev: 0,
+            flags: 0,
+        };
+        let HELLO_TXT_ATTR: FileAttr = FileAttr {
+            ino: 2,
+            size: 13,
+            blocks: 1,
+            atime: CREATE_TIME,
+            mtime: CREATE_TIME,
+            ctime: CREATE_TIME,
+            crtime: CREATE_TIME,
+            kind: FileType::RegularFile,
+            perm: 511u16,
+            nlink: 1,
+            uid: self.current_uid,
+            gid: self.current_uid,
+            rdev: 0,
+            flags: 0,
+        };
         match ino {
             1 => reply.attr(&TTL, &HELLO_DIR_ATTR),
             2 => reply.attr(&TTL, &HELLO_TXT_ATTR),
@@ -131,7 +150,7 @@ fn main() {
     let _session;
     {
         unsafe {
-            _session = fuse::spawn_mount(S3Filesystem, &mountpoint, &[]).unwrap();
+            _session = fuse::spawn_mount(S3Filesystem{current_uid:get_current_uid()}, &mountpoint, &[]).unwrap();
         }
         loop {
             select! {

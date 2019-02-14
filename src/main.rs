@@ -1,13 +1,22 @@
-extern crate fuse;
 extern crate colored;
-extern crate libc;
-extern crate time;
 extern crate ctrlc;
 extern crate crossbeam_channel;
+extern crate fuse;
+extern crate libc;
+extern crate time;
+extern crate toml;
+#[macro_use]
+extern crate serde_derive;
+extern crate s3handler;
+#[macro_use]
+extern crate log;
 
 use std::path::Path;
 use std::ffi::OsStr;
 use std::time::Duration;
+use std::fs::{File, OpenOptions};
+use std::io;
+use std::io::{Read, Write, BufReader, BufRead};
 
 use fuse::{FileAttr, Filesystem, Request, ReplyAttr, ReplyEntry, ReplyDirectory, FileType, 
     ReplyData};
@@ -16,14 +25,51 @@ use libc::ENOENT;
 use time::Timespec;
 use crossbeam_channel::{bounded, tick, Receiver, select};
 use users::get_current_uid;
+use log::{Record, Level, Metadata, LevelFilter};
 
-const TTL: Timespec = Timespec { sec: 1, nsec: 0 };                 // 1 second
+static MY_LOGGER: MyLogger = MyLogger;
+
+struct MyLogger;
+
+impl log::Log for MyLogger {
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        metadata.level() <= Level::Trace
+    }
+
+    fn log(&self, record: &Record) {
+        if self.enabled(record.metadata()) {
+            match record.level() {
+                log::Level::Error => println!("{} - {}", "ERROR".red().bold(), record.args()),
+                log::Level::Warn => println!("{} - {}", "WARN".red(), record.args()),
+                log::Level::Info => println!("{} - {}", "INFO".cyan(), record.args()),
+                log::Level::Debug => println!("{} - {}", "DEBUG".blue().bold(), record.args()),
+                log::Level::Trace => println!("{} - {}", "TRACE".blue(), record.args())
+            }
+            
+        }
+    }
+    fn flush(&self) {}
+}
+
+const TTL: Timespec = Timespec { sec: 1, nsec: 0 };                     // 1 second
 
 const CREATE_TIME: Timespec = Timespec { sec: 1381237736, nsec: 0 };    // 2013-10-08 08:56
 
 
 const HELLO_TXT_CONTENT: &'static str = "Hello World!\n";
 
+
+#[derive(Debug, Deserialize)]
+struct MountConfig {
+    bucket: String,
+    path:String
+}
+
+#[derive(Debug, Deserialize)]
+struct Config {
+    auth: s3handler::CredentialConfig,
+    mount: Vec<MountConfig>
+}
 
 struct S3Filesystem {
     current_uid: u32,
@@ -117,15 +163,6 @@ impl Filesystem for S3Filesystem {
     }
 }
 
-fn usage() {
-    println!(
-        r#"Usage: 
-
-    {} {}"#, 
-    std::env::args().nth(0).unwrap_or("s3fs".to_string()).bold(), 
-    "<MOUNTPOINT>".blue());
-}
-
 fn ctrl_channel() -> Result<Receiver<()>, ctrlc::Error> {
     let (sender, receiver) = bounded(100);
     ctrlc::set_handler(move || {
@@ -136,27 +173,46 @@ fn ctrl_channel() -> Result<Receiver<()>, ctrlc::Error> {
 }
 
 fn main() {
-    let mountpoint = match std::env::args().nth(1) {
-        Some(p) => { p },
-        None => {
-            usage();
-            return;
-        }
-    };
+    let mut s3fscfg = std::env::home_dir().unwrap();
+    s3fscfg.push(".s3fs.toml");
+
+    let mut f;
+    if s3fscfg.exists() {
+        f = File::open(s3fscfg).expect("s3fs config file not found");
+    } else {
+        f = File::create(s3fscfg).expect("Can not write s3fs config file");
+        let _ = f.write_all(
+            b"[auth]\ns3_type = \"aws\"\nhost = \"s3.us-east-1.amazonaws.com\"\nuser = \"admin\"\naccess_key = \"L2D11MY86GEVA6I4DX2S\"\nsecrete_key = \"MBCqT90XMUaBcWd1mcUjPPLdFuNZndiBk0amnVVg\"\nregion = \"us-east-1\"\n[[mount]]\nbucket = \"bucket name\"\npath = \"/mnt\""
+            );
+        print!("Config file {} is created in your home folder, please edit it and add your credentials", ".s3fs.toml".bold());
+        return 
+    }
+    let mut config_contents = String::new();
+    f.read_to_string(&mut config_contents).expect("s3fs config is not readable");
+
+    let config:Config = toml::from_str(config_contents.as_str()).unwrap();
+
+    let mount_point_list = config.mount;
 
     let ctrl_c_events = ctrl_channel().unwrap();
     let ticks = tick(Duration::from_secs(1));
 
-    let _session;
+    let mut _session = Vec::new();
     {
         unsafe {
-            _session = fuse::spawn_mount(S3Filesystem{current_uid:get_current_uid()}, &mountpoint, &[]).unwrap();
+            for path in mount_point_list.into_iter().map(|m| m.path.clone()) {
+                _session.push(
+                    fuse::spawn_mount(
+                        S3Filesystem{current_uid:get_current_uid()}, 
+                        &path, &[]).unwrap()
+                );
+            }
         }
         loop {
             select! {
                 recv(ticks) -> _ => {}
                 recv(ctrl_c_events) -> _ => {
-                    println!("umount {}", mountpoint);
+                    println!("umount s3fs");
                     break;
                 }
             }
